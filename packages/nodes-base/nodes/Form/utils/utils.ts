@@ -29,7 +29,9 @@ import { getResolvables } from '../../../utils/utilities';
 import { WebhookAuthorizationError } from '../../Webhook/error';
 import {
 	generateFormPostBasicAuthToken,
+	generateFormPostHeaderAuthToken,
 	isIpAllowed,
+	validateFormPostHeaderAuthToken,
 	validateWebhookAuthentication,
 } from '../../Webhook/utils';
 import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
@@ -678,7 +680,11 @@ export async function formWebhook(
 
 		let authToken: string | undefined;
 		if (node.typeVersion > 1) {
+			// Try basic auth token first, then header auth token
 			authToken = await generateFormPostBasicAuthToken(context, authProperty);
+			if (!authToken) {
+				authToken = await generateFormPostHeaderAuthToken(context, authProperty);
+			}
 		}
 
 		renderForm({
@@ -700,6 +706,19 @@ export async function formWebhook(
 		return {
 			noWebhookResponse: true,
 		};
+	}
+
+	// POST request - validate header auth token if applicable
+	if (node.typeVersion > 1) {
+		try {
+			await validateFormPostHeaderAuthToken(context, authProperty);
+		} catch (error) {
+			if (error instanceof WebhookAuthorizationError) {
+				res.status(error.responseCode).json({ error: error.message });
+				return { noWebhookResponse: true };
+			}
+			throw error;
+		}
 	}
 
 	let { useWorkflowTimezone } = options;

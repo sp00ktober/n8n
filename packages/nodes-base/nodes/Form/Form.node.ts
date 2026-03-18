@@ -26,8 +26,13 @@ import {
 } from '../Form/common.descriptions';
 import { cssVariables } from './cssVariables';
 import { renderFormCompletion } from './utils/formCompletionUtils';
-import { getFormTriggerNode, renderFormNode } from './utils/formNodeUtils';
+import {
+	getFormTriggerNode,
+	renderFormNode,
+	validateFormPageHeaderAuthToken,
+} from './utils/formNodeUtils';
 import { parseFormFields, prepareFormReturnItem } from './utils/utils';
+import { WebhookAuthorizationError } from '../Webhook/error';
 
 const waitTimeProperties: INodeProperties[] = [
 	{
@@ -392,6 +397,20 @@ export class Form extends Node {
 
 		if (method === 'GET') {
 			return await renderFormNode(context, res, trigger, fields, mode);
+		}
+
+		// POST request - validate header auth token if applicable
+		// Uses trigger's auth settings since Form node doesn't have its own auth config
+		if (trigger.typeVersion > 1) {
+			try {
+				await validateFormPageHeaderAuthToken(context, trigger);
+			} catch (error) {
+				if (error instanceof WebhookAuthorizationError) {
+					res.status(error.responseCode).json({ error: error.message });
+					return { noWebhookResponse: true };
+				}
+				throw error;
+			}
 		}
 
 		let useWorkflowTimezone = context.evaluateExpression(

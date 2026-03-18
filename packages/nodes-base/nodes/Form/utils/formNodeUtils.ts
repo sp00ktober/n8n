@@ -9,6 +9,9 @@ import {
 } from 'n8n-workflow';
 
 import { handleNewlines, renderForm, sanitizeHtml } from './utils';
+import { generateFormPostBasicAuthToken, generateHeaderAuthToken } from '../../Webhook/utils';
+import { WebhookAuthorizationError } from '../../Webhook/error';
+import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
 
 export const renderFormNode = async (
 	context: IWebhookFunctions,
@@ -43,6 +46,19 @@ export const renderFormNode = async (
 		`{{ $('${trigger?.name}').params.options?.appendAttribution === false ? false : true }}`,
 	) as boolean;
 
+	// Get auth token from trigger for multi-page forms
+	// The token is generated based on trigger's auth settings but validated on each page
+	let authToken: string | undefined;
+	if (trigger.typeVersion > 1) {
+		// Try basic auth token first
+		authToken = await generateFormPostBasicAuthToken(context, FORM_TRIGGER_AUTHENTICATION_PROPERTY);
+
+		// If no basic auth token, try header auth token using trigger's settings
+		if (!authToken) {
+			authToken = await generateFormPageHeaderAuthToken(context, trigger);
+		}
+	}
+
 	renderForm({
 		context,
 		res,
@@ -55,12 +71,134 @@ export const renderFormNode = async (
 		appendAttribution,
 		buttonLabel,
 		customCss: options.customCss,
+		authToken,
 	});
 
 	return {
 		noWebhookResponse: true,
 	};
 };
+
+/**
+ * Generates header auth token for intermediate Form pages.
+ * Reads settings from the FormTrigger node since intermediate pages don't have their own auth settings.
+ */
+async function generateFormPageHeaderAuthToken(
+	context: IWebhookFunctions,
+	trigger: NodeTypeAndVersion,
+): Promise<string | undefined> {
+	// Check if trigger uses headerAuth
+	const authentication = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.${FORM_TRIGGER_AUTHENTICATION_PROPERTY} }}`,
+	) as string;
+
+	if (authentication !== 'headerAuth') {
+		return undefined;
+	}
+
+	// Get header auth settings from trigger
+	const headerAuthSettings = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.headerAuthSettings }}`,
+	) as { settings?: { csrfSecret?: string; emailHeaderName?: string } } | undefined;
+
+	const settings = headerAuthSettings?.settings ?? {};
+	const csrfSecret = settings.csrfSecret;
+	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
+
+	if (!csrfSecret) {
+		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	}
+
+	// Get email from request header
+	const req = context.getRequestObject();
+	const email = req.headers[emailHeaderName] as string;
+	if (!email) {
+		throw new WebhookAuthorizationError(401, `Missing authentication header: ${emailHeaderName}`);
+	}
+
+	// Get form path - use trigger's webhook path
+	const formPath =
+		(context.evaluateExpression(`{{ $('${trigger.name}').params.path }}`) as string) ||
+		(context.evaluateExpression(`{{ $('${trigger.name}').params.options?.path }}`) as string) ||
+		'';
+
+	return generateHeaderAuthToken(csrfSecret, email, formPath);
+}
+
+/**
+ * Validates header auth token for intermediate Form pages.
+ * Reads settings from the FormTrigger node.
+ */
+export async function validateFormPageHeaderAuthToken(
+	context: IWebhookFunctions,
+	trigger: NodeTypeAndVersion,
+): Promise<boolean> {
+	// Check if trigger uses headerAuth
+	const authentication = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.${FORM_TRIGGER_AUTHENTICATION_PROPERTY} }}`,
+	) as string;
+
+	if (authentication !== 'headerAuth') {
+		return true;
+	}
+
+	const req = context.getRequestObject();
+	const headers = context.getHeaderData();
+
+	// Get token from header
+	const token = headers['x-auth-token'] as string;
+	if (!token) {
+		throw new WebhookAuthorizationError(401, 'Missing CSRF token');
+	}
+
+	// Get header auth settings from trigger
+	const headerAuthSettings = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.headerAuthSettings }}`,
+	) as
+		| { settings?: { csrfSecret?: string; emailHeaderName?: string; tokenExpiryMinutes?: number } }
+		| undefined;
+
+	const settings = headerAuthSettings?.settings ?? {};
+	const csrfSecret = settings.csrfSecret;
+	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
+	const tokenExpiryMinutes = settings.tokenExpiryMinutes ?? 60;
+
+	if (!csrfSecret) {
+		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	}
+
+	// Get email from header - must still be present on POST (via proxy)
+	const email = req.headers[emailHeaderName] as string;
+	if (!email) {
+		throw new WebhookAuthorizationError(
+			401,
+			'Missing authentication header on POST - request may not have gone through auth proxy',
+		);
+	}
+
+	// Get form path - use trigger's webhook path
+	const formPath =
+		(context.evaluateExpression(`{{ $('${trigger.name}').params.path }}`) as string) ||
+		(context.evaluateExpression(`{{ $('${trigger.name}').params.options?.path }}`) as string) ||
+		'';
+
+	// Import and use validateHeaderAuthToken
+	const { validateHeaderAuthToken } = await import('../../Webhook/utils');
+
+	const isValid = validateHeaderAuthToken(
+		csrfSecret,
+		email,
+		formPath,
+		token,
+		tokenExpiryMinutes * 60 * 1000,
+	);
+
+	if (!isValid) {
+		throw new WebhookAuthorizationError(403, 'Invalid or expired CSRF token');
+	}
+
+	return true;
+}
 
 /**
  * Retrieves the active Form Trigger node from the workflow's parent nodes.
