@@ -127,6 +127,10 @@ export function getFormTriggerNode(context: IWebhookFunctions): NodeTypeAndVersi
  * Generates AES-GCM encrypted proxy auth token for intermediate Form pages.
  * Gets credentials from the Form node's own credential link (user must link proxyAuthApi to Form node).
  * Gets settings from FormTrigger via expression.
+ *
+ * For multi-page forms, the email is extracted from the incoming token (from previous page)
+ * rather than from request headers, since intermediate pages may not have the OAuth headers.
+ *
  * @param pageNumber - The page number in the multi-page form sequence
  */
 async function generateFormPageProxyAuthToken(
@@ -162,30 +166,51 @@ async function generateFormPageProxyAuthToken(
 		);
 	}
 
-	// Get proxy auth settings from trigger
-	const proxyAuthSettings = context.evaluateExpression(
-		`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
-	) as { settings?: { emailHeaderName?: string } } | undefined;
-
-	const settings = proxyAuthSettings?.settings ?? {};
-	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
-
-	// Get email from request header
-	const req = context.getRequestObject();
-	const email = req.headers[emailHeaderName] as string;
-	if (!email) {
-		throw new WebhookAuthorizationError(401, `Missing authentication header: ${emailHeaderName}`);
-	}
-
 	// Get form path - use trigger's webhook path
 	const formPath =
 		(context.evaluateExpression(`{{ $('${trigger.name}').params.path }}`) as string) ||
 		(context.evaluateExpression(`{{ $('${trigger.name}').params.options?.path }}`) as string) ||
 		'';
 
-	// Create encrypted token payload
+	// For intermediate pages, get email from the incoming token (from previous page submission)
+	// This chains the authenticated email through: page 1 → page 2 → page 3, etc.
+	const headers = context.getHeaderData();
+	const incomingToken = headers['x-auth-token'] as string;
+
+	let email: string;
+
+	if (incomingToken) {
+		// Extract email from the incoming token (from previous page)
+		try {
+			const previousPayload = decryptToken(encryptionSecret, incomingToken);
+			email = previousPayload.email;
+		} catch {
+			throw new WebhookAuthorizationError(403, 'Invalid or tampered token from previous page');
+		}
+	} else {
+		// Fallback: try to get email from request header (for first page or direct requests)
+		const proxyAuthSettings = context.evaluateExpression(
+			`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
+		) as { settings?: { emailHeaderName?: string } } | undefined;
+
+		const settings = proxyAuthSettings?.settings ?? {};
+		const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
+
+		const req = context.getRequestObject();
+		email = req.headers[emailHeaderName] as string;
+
+		if (!email) {
+			throw new WebhookAuthorizationError(
+				401,
+				'No authentication token or email header found. Submit from an authenticated page.',
+			);
+		}
+		email = email.toLowerCase();
+	}
+
+	// Create encrypted token payload with the chained email
 	const payload: TokenPayload = {
-		email: email.toLowerCase(),
+		email,
 		formPath,
 		pageNumber,
 		timestamp: Date.now(),
