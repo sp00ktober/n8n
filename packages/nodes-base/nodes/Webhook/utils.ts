@@ -418,3 +418,229 @@ export function generateBasicAuthToken(
 
 	return token;
 }
+
+// Header Auth token expiry: 1 hour default
+const HEADER_AUTH_TOKEN_EXPIRY_MS = 60 * 60 * 1000;
+
+/**
+ * Generates HMAC-SHA256 token for header auth CSRF protection.
+ * Token format: timestamp:hmac
+ * The token binds the authenticated email, form path, and timestamp together.
+ */
+export function generateHeaderAuthToken(
+	secret: string,
+	email: string,
+	formPath: string,
+	timestamp?: number,
+): string {
+	const ts = timestamp ?? Date.now();
+
+	// Create HMAC binding email + formPath + timestamp
+	const dataToSign = `${email}:${formPath}:${ts}`;
+	const hmac = createHmac('sha256', secret).update(dataToSign).digest('hex');
+
+	// Return timestamp:hmac format for validation
+	return `${ts}:${hmac}`;
+}
+
+/**
+ * Validates header auth token with timing-safe comparison.
+ * Returns true if valid, false if invalid or expired.
+ */
+export function validateHeaderAuthToken(
+	secret: string,
+	email: string,
+	formPath: string,
+	token: string,
+	expiryMs: number = HEADER_AUTH_TOKEN_EXPIRY_MS,
+): boolean {
+	// Parse token
+	const colonIndex = token.indexOf(':');
+	if (colonIndex === -1) {
+		return false;
+	}
+
+	const timestampStr = token.substring(0, colonIndex);
+	const providedHmac = token.substring(colonIndex + 1);
+
+	const timestamp = parseInt(timestampStr, 10);
+	if (isNaN(timestamp)) {
+		return false;
+	}
+
+	// Check expiry
+	const now = Date.now();
+	if (now - timestamp > expiryMs) {
+		return false;
+	}
+
+	// Regenerate expected token and compare
+	const expectedToken = generateHeaderAuthToken(secret, email, formPath, timestamp);
+	const expectedHmac = expectedToken.substring(expectedToken.indexOf(':') + 1);
+
+	// Timing-safe comparison
+	try {
+		const expectedBuffer = Buffer.from(expectedHmac, 'hex');
+		const providedBuffer = Buffer.from(providedHmac, 'hex');
+
+		if (expectedBuffer.length !== providedBuffer.length) {
+			return false;
+		}
+
+		return timingSafeEqual(expectedBuffer, providedBuffer);
+	} catch {
+		return false;
+	}
+}
+
+// Type for headerAuthSettings fixedCollection
+interface HeaderAuthSettings {
+	settings?: {
+		csrfSecret?: string;
+		emailHeaderName?: string;
+		tokenExpiryMinutes?: number;
+	};
+}
+
+/**
+ * Gets header auth settings from the node parameters.
+ * Handles the fixedCollection structure.
+ */
+function getHeaderAuthSettings(context: IWebhookFunctions): {
+	csrfSecret: string | undefined;
+	emailHeaderName: string;
+	tokenExpiryMinutes: number;
+} {
+	let headerAuthSettings: HeaderAuthSettings = {};
+	try {
+		headerAuthSettings = context.getNodeParameter('headerAuthSettings', {}) as HeaderAuthSettings;
+	} catch {
+		// Parameter might not exist
+	}
+
+	const settings = headerAuthSettings.settings ?? {};
+
+	return {
+		csrfSecret: settings.csrfSecret,
+		emailHeaderName: (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase(),
+		tokenExpiryMinutes: settings.tokenExpiryMinutes ?? 60,
+	};
+}
+
+/**
+ * Generates header auth token for form POST requests.
+ * Uses the email from X-Auth-Request-Email header (or configured header name)
+ * and a user-provided CSRF secret.
+ */
+export async function generateFormPostHeaderAuthToken(
+	context: IWebhookFunctions,
+	authPropertyName: string,
+): Promise<string | undefined> {
+	const authentication = context.getNodeParameter(authPropertyName) as string;
+	if (authentication !== 'headerAuth') {
+		return undefined;
+	}
+
+	const req = context.getRequestObject();
+	const { csrfSecret, emailHeaderName } = getHeaderAuthSettings(context);
+
+	if (!csrfSecret) {
+		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	}
+
+	// Extract email from header (case-insensitive)
+	const email = req.headers[emailHeaderName] as string;
+	if (!email) {
+		throw new WebhookAuthorizationError(401, `Missing authentication header: ${emailHeaderName}`);
+	}
+
+	// Get form path for binding
+	let formPath = '';
+	try {
+		formPath = context.getNodeParameter('path', '') as string;
+	} catch {
+		// Parameter might not exist
+	}
+	if (!formPath) {
+		try {
+			formPath = context.getNodeParameter('options.path', '') as string;
+		} catch {
+			// Parameter might not exist
+		}
+	}
+	if (!formPath) {
+		formPath = context.getNode().webhookId || '';
+	}
+
+	return generateHeaderAuthToken(csrfSecret, email, formPath);
+}
+
+/**
+ * Validates header auth token on POST request.
+ * Returns true if valid, throws WebhookAuthorizationError if invalid.
+ */
+export async function validateFormPostHeaderAuthToken(
+	context: IWebhookFunctions,
+	authPropertyName: string,
+): Promise<boolean> {
+	const authentication = context.getNodeParameter(authPropertyName) as string;
+	if (authentication !== 'headerAuth') {
+		return true;
+	}
+
+	const req = context.getRequestObject();
+	const headers = context.getHeaderData();
+
+	// Get token from header
+	const token = headers['x-auth-token'] as string;
+	if (!token) {
+		throw new WebhookAuthorizationError(401, 'Missing CSRF token');
+	}
+
+	const { csrfSecret, emailHeaderName, tokenExpiryMinutes } = getHeaderAuthSettings(context);
+
+	if (!csrfSecret) {
+		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	}
+
+	// Get email from header - must still be present on POST (via proxy)
+	const email = req.headers[emailHeaderName] as string;
+	if (!email) {
+		throw new WebhookAuthorizationError(
+			401,
+			'Missing authentication header on POST - request may not have gone through auth proxy',
+		);
+	}
+
+	// Get form path for validation
+	let formPath = '';
+	try {
+		formPath = context.getNodeParameter('path', '') as string;
+	} catch {
+		// Parameter might not exist
+	}
+	if (!formPath) {
+		try {
+			formPath = context.getNodeParameter('options.path', '') as string;
+		} catch {
+			// Parameter might not exist
+		}
+	}
+	if (!formPath) {
+		formPath = context.getNode().webhookId || '';
+	}
+
+	const isValid = validateHeaderAuthToken(
+		csrfSecret,
+		email,
+		formPath,
+		token,
+		tokenExpiryMinutes * 60 * 1000,
+	);
+
+	if (!isValid) {
+		throw new WebhookAuthorizationError(403, 'Invalid or expired CSRF token');
+	}
+
+	return true;
+}

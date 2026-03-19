@@ -94,6 +94,12 @@ const descriptionV2: INodeTypeDescription = {
 					value: 'basicAuth',
 				},
 				{
+					name: 'Header Auth',
+					value: 'headerAuth',
+					description:
+						'For external auth proxies (e.g., oauth2-proxy) that pass authenticated user email via HTTP header',
+				},
+				{
 					name: 'None',
 					value: 'none',
 				},
@@ -129,6 +135,53 @@ const descriptionV2: INodeTypeDescription = {
 			name: ADD_FORM_NOTICE,
 			type: 'notice',
 			default: '',
+		},
+		{
+			displayName: 'Header Auth Settings',
+			name: 'headerAuthSettings',
+			type: 'fixedCollection',
+			placeholder: 'Configure Header Auth',
+			default: {},
+			displayOptions: {
+				show: {
+					[FORM_TRIGGER_AUTHENTICATION_PROPERTY]: ['headerAuth'],
+				},
+			},
+			options: [
+				{
+					displayName: 'Settings',
+					name: 'settings',
+					values: [
+						{
+							displayName: 'CSRF Secret',
+							name: 'csrfSecret',
+							type: 'string',
+							typeOptions: {
+								password: true,
+							},
+							default: '',
+							required: true,
+							description:
+								'Secret key used to generate CSRF tokens. Should be a random string of at least 32 characters. Keep this secure.',
+						},
+						{
+							displayName: 'Email Header Name',
+							name: 'emailHeaderName',
+							type: 'string',
+							default: 'x-auth-request-email',
+							description:
+								'The header name containing the authenticated user email from your auth proxy (e.g., X-Auth-Request-Email for oauth2-proxy)',
+						},
+						{
+							displayName: 'Token Expiry (Minutes)',
+							name: 'tokenExpiryMinutes',
+							type: 'number',
+							default: 60,
+							description: 'How long the CSRF token remains valid (default: 60 minutes)',
+						},
+					],
+				},
+			],
 		},
 		{
 			displayName: 'Options',

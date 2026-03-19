@@ -1,0 +1,12 @@
+# Patch official n8n 2.3.5 image with header auth CSRF support
+FROM n8nio/n8n:2.3.5
+
+# Copy patched files
+COPY packages/nodes-base/dist/nodes/Webhook/utils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Webhook/utils.js
+COPY packages/nodes-base/dist/nodes/Webhook/error.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Webhook/error.js
+COPY packages/nodes-base/dist/nodes/Form/Form.node.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/Form.node.js
+COPY packages/nodes-base/dist/nodes/Form/v2/FormTriggerV2.node.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/v2/FormTriggerV2.node.js
+COPY packages/nodes-base/dist/nodes/Form/utils/utils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/utils/utils.js
+COPY packages/nodes-base/dist/nodes/Form/utils/formNodeUtils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/utils/formNodeUtils.js
+
+LABEL org.opencontainers.image.description="n8n 2.3.5 with Header Auth CSRF Protection"
