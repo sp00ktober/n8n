@@ -15,6 +15,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { BlockList } from 'node:net';
 
 import { WebhookAuthorizationError } from './error';
+import { encryptToken, decryptToken, type TokenPayload } from './tokenCrypto';
 import { formatPrivateKey } from '../../utils/utilities';
 
 export type WebhookParameters = {
@@ -279,6 +280,24 @@ export async function validateWebhookAuthentication(
 			// Provided authentication data is wrong
 			throw new WebhookAuthorizationError(403);
 		}
+	} else if (authentication === 'proxyAuth') {
+		// AES-GCM encrypted token auth for external auth proxies (oauth2-proxy, etc.)
+		// GET: validates email header exists and returns encrypted token
+		// POST: token is decrypted to get trusted email (validation in validateFormPostProxyAuthToken)
+		const { emailHeaderName } = getProxyAuthSettings(ctx);
+
+		const req = ctx.getRequestObject();
+		if (req.method === 'GET') {
+			const email = (headers as IDataObject)[emailHeaderName];
+			if (!email) {
+				throw new WebhookAuthorizationError(
+					401,
+					`Missing authentication header: ${emailHeaderName}`,
+				);
+			}
+		}
+		// POST requests: token validation happens in validateFormPostProxyAuthToken
+		return;
 	} else if (authentication === 'jwtAuth') {
 		let expectedAuth;
 
@@ -427,7 +446,7 @@ const HEADER_AUTH_TOKEN_EXPIRY_MS = 60 * 60 * 1000;
  * Token format: timestamp:hmac
  * The token binds the authenticated email, form path, and timestamp together.
  */
-export function generateHeaderAuthToken(
+export function generateProxyAuthToken(
 	secret: string,
 	email: string,
 	formPath: string,
@@ -447,7 +466,7 @@ export function generateHeaderAuthToken(
  * Validates header auth token with timing-safe comparison.
  * Returns true if valid, false if invalid or expired.
  */
-export function validateHeaderAuthToken(
+export function validateProxyAuthToken(
 	secret: string,
 	email: string,
 	formPath: string,
@@ -475,7 +494,7 @@ export function validateHeaderAuthToken(
 	}
 
 	// Regenerate expected token and compare
-	const expectedToken = generateHeaderAuthToken(secret, email, formPath, timestamp);
+	const expectedToken = generateProxyAuthToken(secret, email, formPath, timestamp);
 	const expectedHmac = expectedToken.substring(expectedToken.indexOf(':') + 1);
 
 	// Timing-safe comparison
@@ -493,68 +512,41 @@ export function validateHeaderAuthToken(
 	}
 }
 
-// Type for headerAuthSettings fixedCollection
-interface HeaderAuthSettings {
+// Type for proxyAuthSettings fixedCollection
+interface ProxyAuthSettings {
 	settings?: {
-		csrfSecret?: string;
 		emailHeaderName?: string;
 		tokenExpiryMinutes?: number;
 	};
 }
 
 /**
- * Gets header auth settings from the node parameters.
+ * Gets proxy auth settings from the node parameters.
  * Handles the fixedCollection structure.
  */
-function getHeaderAuthSettings(context: IWebhookFunctions): {
-	csrfSecret: string | undefined;
+export function getProxyAuthSettings(context: IWebhookFunctions): {
 	emailHeaderName: string;
 	tokenExpiryMinutes: number;
 } {
-	let headerAuthSettings: HeaderAuthSettings = {};
+	let proxyAuthSettings: ProxyAuthSettings = {};
 	try {
-		headerAuthSettings = context.getNodeParameter('headerAuthSettings', {}) as HeaderAuthSettings;
+		proxyAuthSettings = context.getNodeParameter('proxyAuthSettings', {}) as ProxyAuthSettings;
 	} catch {
 		// Parameter might not exist
 	}
 
-	const settings = headerAuthSettings.settings ?? {};
+	const settings = proxyAuthSettings.settings ?? {};
 
 	return {
-		csrfSecret: settings.csrfSecret,
 		emailHeaderName: (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase(),
-		tokenExpiryMinutes: settings.tokenExpiryMinutes ?? 60,
+		tokenExpiryMinutes: settings.tokenExpiryMinutes ?? 10, // Changed default from 60 to 10
 	};
 }
 
 /**
- * Generates header auth token for form POST requests.
- * Uses the email from X-Auth-Request-Email header (or configured header name)
- * and a user-provided CSRF secret.
+ * Gets the form path for token binding.
  */
-export async function generateFormPostHeaderAuthToken(
-	context: IWebhookFunctions,
-	authPropertyName: string,
-): Promise<string | undefined> {
-	const authentication = context.getNodeParameter(authPropertyName) as string;
-	if (authentication !== 'headerAuth') {
-		return undefined;
-	}
-
-	const req = context.getRequestObject();
-	const { csrfSecret, emailHeaderName } = getHeaderAuthSettings(context);
-
-	if (!csrfSecret) {
-		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
-	}
-
-	// Extract email from header (case-insensitive)
-	const email = req.headers[emailHeaderName] as string;
-	if (!email) {
-		throw new WebhookAuthorizationError(401, `Missing authentication header: ${emailHeaderName}`);
-	}
-
-	// Get form path for binding
+function getFormPath(context: IWebhookFunctions): string {
 	let formPath = '';
 	try {
 		formPath = context.getNodeParameter('path', '') as string;
@@ -571,24 +563,76 @@ export async function generateFormPostHeaderAuthToken(
 	if (!formPath) {
 		formPath = context.getNode().webhookId || '';
 	}
-
-	return generateHeaderAuthToken(csrfSecret, email, formPath);
+	return formPath;
 }
 
 /**
- * Validates header auth token on POST request.
- * Returns true if valid, throws WebhookAuthorizationError if invalid.
+ * Generates AES-GCM encrypted proxy auth token for form POST requests.
+ * The token contains the authenticated email, form path, page number, and timestamp.
+ * Uses encryption secret from proxyAuthApi credentials.
  */
-export async function validateFormPostHeaderAuthToken(
+export async function generateFormPostProxyAuthToken(
 	context: IWebhookFunctions,
 	authPropertyName: string,
-): Promise<boolean> {
+	pageNumber: number = 1,
+): Promise<string | undefined> {
 	const authentication = context.getNodeParameter(authPropertyName) as string;
-	if (authentication !== 'headerAuth') {
-		return true;
+	if (authentication !== 'proxyAuth') {
+		return undefined;
+	}
+
+	// Get encryption secret from credentials
+	let credentials: ICredentialDataDecryptedObject | undefined;
+	try {
+		credentials = await context.getCredentials<ICredentialDataDecryptedObject>('proxyAuthApi');
+	} catch {
+		throw new WebhookAuthorizationError(500, 'Proxy Auth credentials not configured');
+	}
+
+	const encryptionSecret = credentials?.encryptionSecret as string;
+	if (!encryptionSecret) {
+		throw new WebhookAuthorizationError(
+			500,
+			'Encryption secret not configured in Proxy Auth credentials',
+		);
 	}
 
 	const req = context.getRequestObject();
+	const { emailHeaderName } = getProxyAuthSettings(context);
+
+	// Extract email from header (case-insensitive, trusted on GET because OAuth ran)
+	const email = req.headers[emailHeaderName] as string;
+	if (!email) {
+		throw new WebhookAuthorizationError(401, `Missing authentication header: ${emailHeaderName}`);
+	}
+
+	const formPath = getFormPath(context);
+
+	// Create encrypted token payload
+	const payload: TokenPayload = {
+		email: email.toLowerCase(),
+		formPath,
+		pageNumber,
+		timestamp: Date.now(),
+	};
+
+	return encryptToken(encryptionSecret, payload);
+}
+
+/**
+ * Validates AES-GCM encrypted proxy auth token on POST request.
+ * Decrypts the token to get the trusted email (NOT from headers).
+ * Returns the validation result with the trusted email from the token.
+ */
+export async function validateFormPostProxyAuthToken(
+	context: IWebhookFunctions,
+	authPropertyName: string,
+): Promise<{ valid: boolean; email?: string }> {
+	const authentication = context.getNodeParameter(authPropertyName) as string;
+	if (authentication !== 'proxyAuth') {
+		return { valid: true };
+	}
+
 	const headers = context.getHeaderData();
 
 	// Get token from header
@@ -597,50 +641,45 @@ export async function validateFormPostHeaderAuthToken(
 		throw new WebhookAuthorizationError(401, 'Missing CSRF token');
 	}
 
-	const { csrfSecret, emailHeaderName, tokenExpiryMinutes } = getHeaderAuthSettings(context);
-
-	if (!csrfSecret) {
-		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	// Get encryption secret from credentials
+	let credentials: ICredentialDataDecryptedObject | undefined;
+	try {
+		credentials = await context.getCredentials<ICredentialDataDecryptedObject>('proxyAuthApi');
+	} catch {
+		throw new WebhookAuthorizationError(500, 'Proxy Auth credentials not configured');
 	}
 
-	// Get email from header - must still be present on POST (via proxy)
-	const email = req.headers[emailHeaderName] as string;
-	if (!email) {
+	const encryptionSecret = credentials?.encryptionSecret as string;
+	if (!encryptionSecret) {
 		throw new WebhookAuthorizationError(
-			401,
-			'Missing authentication header on POST - request may not have gone through auth proxy',
+			500,
+			'Encryption secret not configured in Proxy Auth credentials',
 		);
 	}
 
-	// Get form path for validation
-	let formPath = '';
+	const { tokenExpiryMinutes } = getProxyAuthSettings(context);
+
+	// Decrypt token to get trusted payload
+	let payload: TokenPayload;
 	try {
-		formPath = context.getNodeParameter('path', '') as string;
+		payload = decryptToken(encryptionSecret, token);
 	} catch {
-		// Parameter might not exist
-	}
-	if (!formPath) {
-		try {
-			formPath = context.getNodeParameter('options.path', '') as string;
-		} catch {
-			// Parameter might not exist
-		}
-	}
-	if (!formPath) {
-		formPath = context.getNode().webhookId || '';
+		throw new WebhookAuthorizationError(403, 'Invalid or tampered token');
 	}
 
-	const isValid = validateHeaderAuthToken(
-		csrfSecret,
-		email,
-		formPath,
-		token,
-		tokenExpiryMinutes * 60 * 1000,
-	);
-
-	if (!isValid) {
-		throw new WebhookAuthorizationError(403, 'Invalid or expired CSRF token');
+	// Validate timestamp
+	const age = Date.now() - payload.timestamp;
+	if (age > tokenExpiryMinutes * 60 * 1000) {
+		throw new WebhookAuthorizationError(403, 'Token expired');
 	}
 
-	return true;
+	const formPath = getFormPath(context);
+
+	// Validate form path
+	if (payload.formPath !== formPath) {
+		throw new WebhookAuthorizationError(403, 'Token form path mismatch');
+	}
+
+	// Return trusted email from encrypted token (NOT from headers!)
+	return { valid: true, email: payload.email };
 }

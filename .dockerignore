@@ -25,3 +25,7 @@
 !docker/images/n8n/docker-entrypoint.sh
 !docker/images/runners
 !docker/images/runners/n8n-task-runners.json
+
+# === Proxy Auth patch files ===
+!patches
+!patches/patch-nodes-json.js

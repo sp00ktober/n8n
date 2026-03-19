@@ -82,6 +82,15 @@ const descriptionV2: INodeTypeDescription = {
 				},
 			},
 		},
+		{
+			name: 'proxyAuthApi',
+			required: true,
+			displayOptions: {
+				show: {
+					[FORM_TRIGGER_AUTHENTICATION_PROPERTY]: ['proxyAuth'],
+				},
+			},
+		},
 	],
 	properties: [
 		{
@@ -94,8 +103,8 @@ const descriptionV2: INodeTypeDescription = {
 					value: 'basicAuth',
 				},
 				{
-					name: 'Header Auth',
-					value: 'headerAuth',
+					name: 'Proxy Auth',
+					value: 'proxyAuth',
 					description:
 						'For external auth proxies (e.g., oauth2-proxy) that pass authenticated user email via HTTP header',
 				},
@@ -137,14 +146,14 @@ const descriptionV2: INodeTypeDescription = {
 			default: '',
 		},
 		{
-			displayName: 'Header Auth Settings',
-			name: 'headerAuthSettings',
+			displayName: 'Proxy Auth Settings',
+			name: 'proxyAuthSettings',
 			type: 'fixedCollection',
-			placeholder: 'Configure Header Auth',
+			placeholder: 'Configure Proxy Auth',
 			default: {},
 			displayOptions: {
 				show: {
-					[FORM_TRIGGER_AUTHENTICATION_PROPERTY]: ['headerAuth'],
+					[FORM_TRIGGER_AUTHENTICATION_PROPERTY]: ['proxyAuth'],
 				},
 			},
 			options: [
@@ -152,18 +161,6 @@ const descriptionV2: INodeTypeDescription = {
 					displayName: 'Settings',
 					name: 'settings',
 					values: [
-						{
-							displayName: 'CSRF Secret',
-							name: 'csrfSecret',
-							type: 'string',
-							typeOptions: {
-								password: true,
-							},
-							default: '',
-							required: true,
-							description:
-								'Secret key used to generate CSRF tokens. Should be a random string of at least 32 characters. Keep this secure.',
-						},
 						{
 							displayName: 'Email Header Name',
 							name: 'emailHeaderName',
@@ -176,8 +173,8 @@ const descriptionV2: INodeTypeDescription = {
 							displayName: 'Token Expiry (Minutes)',
 							name: 'tokenExpiryMinutes',
 							type: 'number',
-							default: 60,
-							description: 'How long the CSRF token remains valid (default: 60 minutes)',
+							default: 10,
+							description: 'How long the CSRF token remains valid (default: 10 minutes)',
 						},
 					],
 				},

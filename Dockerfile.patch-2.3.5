@@ -1,12 +1,27 @@
-# Patch official n8n 2.3.5 image with header auth CSRF support
+# Patch official n8n 2.3.5 image with Proxy Auth (AES-GCM encrypted CSRF) support
 FROM n8nio/n8n:2.3.5
 
-# Copy patched files
+USER root
+
+# Copy patched JavaScript files for Webhook/Form nodes
 COPY packages/nodes-base/dist/nodes/Webhook/utils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Webhook/utils.js
 COPY packages/nodes-base/dist/nodes/Webhook/error.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Webhook/error.js
+COPY packages/nodes-base/dist/nodes/Webhook/tokenCrypto.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Webhook/tokenCrypto.js
 COPY packages/nodes-base/dist/nodes/Form/Form.node.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/Form.node.js
 COPY packages/nodes-base/dist/nodes/Form/v2/FormTriggerV2.node.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/v2/FormTriggerV2.node.js
 COPY packages/nodes-base/dist/nodes/Form/utils/utils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/utils/utils.js
 COPY packages/nodes-base/dist/nodes/Form/utils/formNodeUtils.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/nodes/Form/utils/formNodeUtils.js
 
-LABEL org.opencontainers.image.description="n8n 2.3.5 with Header Auth CSRF Protection"
+# Copy Proxy Auth credential type
+COPY packages/nodes-base/dist/credentials/ProxyAuthApi.credentials.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/credentials/ProxyAuthApi.credentials.js
+
+# Copy patch script and run it to update nodes.json and credentials.json files
+COPY patches/patch-nodes-json.js /tmp/patch-nodes-json.js
+RUN chmod -R a+w /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/types && \
+    chmod -R a+w /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/known && \
+    node /tmp/patch-nodes-json.js /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist && \
+    rm /tmp/patch-nodes-json.js
+
+USER node
+
+LABEL org.opencontainers.image.description="n8n 2.3.5 with Proxy Auth (AES-GCM encrypted CSRF tokens)"

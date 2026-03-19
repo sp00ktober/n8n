@@ -299,6 +299,14 @@ export class Form extends Node {
 		outputs: [NodeConnectionTypes.Main],
 		waitingNodeTooltip:
 			'=Execution will continue when form is submitted on <a href="{{ $execution.resumeFormUrl }}" target="_blank">{{ $execution.resumeFormUrl }}</a>',
+		credentials: [
+			{
+				// Proxy Auth credential for multi-page forms with proxy authentication
+				// Users must link the same credential that's on the FormTrigger node
+				name: 'proxyAuthApi',
+				required: false,
+			},
+		],
 		webhooks: [
 			{
 				name: 'default',

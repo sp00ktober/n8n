@@ -27,8 +27,8 @@ import { getResolvables } from '../../../utils/utilities';
 import { WebhookAuthorizationError } from '../../Webhook/error';
 import {
 	generateFormPostBasicAuthToken,
-	generateFormPostHeaderAuthToken,
-	validateFormPostHeaderAuthToken,
+	generateFormPostProxyAuthToken,
+	validateFormPostProxyAuthToken,
 	validateWebhookAuthentication,
 } from '../../Webhook/utils';
 import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
@@ -646,10 +646,10 @@ export async function formWebhook(
 
 		let authToken: string | undefined;
 		if (node.typeVersion > 1) {
-			// Try basic auth token first, then header auth token
+			// Try basic auth token first, then proxy auth token
 			authToken = await generateFormPostBasicAuthToken(context, authProperty);
 			if (!authToken) {
-				authToken = await generateFormPostHeaderAuthToken(context, authProperty);
+				authToken = await generateFormPostProxyAuthToken(context, authProperty);
 			}
 		}
 
@@ -674,10 +674,10 @@ export async function formWebhook(
 		};
 	}
 
-	// POST request - validate header auth token if applicable
+	// POST request - validate proxy auth token if applicable
 	if (node.typeVersion > 1) {
 		try {
-			await validateFormPostHeaderAuthToken(context, authProperty);
+			await validateFormPostProxyAuthToken(context, authProperty);
 		} catch (error) {
 			if (error instanceof WebhookAuthorizationError) {
 				res.status(error.responseCode).json({ error: error.message });

@@ -4,16 +4,14 @@ import {
 	type IWebhookFunctions,
 	type FormFieldsParameter,
 	type IWebhookResponseData,
+	type ICredentialDataDecryptedObject,
 	NodeOperationError,
 	FORM_TRIGGER_NODE_TYPE,
 } from 'n8n-workflow';
 
 import { renderForm, sanitizeHtml } from './utils';
-import {
-	generateFormPostBasicAuthToken,
-	generateHeaderAuthToken,
-	validateHeaderAuthToken,
-} from '../../Webhook/utils';
+import { generateFormPostBasicAuthToken } from '../../Webhook/utils';
+import { encryptToken, decryptToken, type TokenPayload } from '../../Webhook/tokenCrypto';
 import { WebhookAuthorizationError } from '../../Webhook/error';
 import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
 
@@ -54,12 +52,20 @@ export const renderFormNode = async (
 	// The token is generated based on trigger's auth settings but validated on each page
 	let authToken: string | undefined;
 	if (trigger.typeVersion > 1) {
-		// Try basic auth token first
-		authToken = await generateFormPostBasicAuthToken(context, FORM_TRIGGER_AUTHENTICATION_PROPERTY);
+		// Try basic auth token first (may fail for Form nodes that don't have auth params)
+		try {
+			authToken = await generateFormPostBasicAuthToken(
+				context,
+				FORM_TRIGGER_AUTHENTICATION_PROPERTY,
+			);
+		} catch {
+			// Form node doesn't have authentication parameter, which is expected
+			// Continue to try proxy auth token
+		}
 
-		// If no basic auth token, try header auth token using trigger's settings
+		// If no basic auth token, try proxy auth token using Form node's credentials
 		if (!authToken) {
-			authToken = await generateFormPageHeaderAuthToken(context, trigger);
+			authToken = await generateFormPageProxyAuthToken(context, trigger);
 		}
 	}
 
@@ -118,34 +124,51 @@ export function getFormTriggerNode(context: IWebhookFunctions): NodeTypeAndVersi
 }
 
 /**
- * Generates header auth token for intermediate Form pages.
- * Reads settings from the FormTrigger node since intermediate pages don't have their own auth settings.
+ * Generates AES-GCM encrypted proxy auth token for intermediate Form pages.
+ * Gets credentials from the Form node's own credential link (user must link proxyAuthApi to Form node).
+ * Gets settings from FormTrigger via expression.
+ * @param pageNumber - The page number in the multi-page form sequence
  */
-async function generateFormPageHeaderAuthToken(
+async function generateFormPageProxyAuthToken(
 	context: IWebhookFunctions,
 	trigger: NodeTypeAndVersion,
+	pageNumber: number = 1,
 ): Promise<string | undefined> {
-	// Check if trigger uses headerAuth
+	// Check if trigger uses proxyAuth
 	const authentication = context.evaluateExpression(
 		`{{ $('${trigger.name}').params.${FORM_TRIGGER_AUTHENTICATION_PROPERTY} }}`,
 	) as string;
 
-	if (authentication !== 'headerAuth') {
+	if (authentication !== 'proxyAuth') {
 		return undefined;
 	}
 
-	// Get header auth settings from trigger
-	const headerAuthSettings = context.evaluateExpression(
-		`{{ $('${trigger.name}').params.headerAuthSettings }}`,
-	) as { settings?: { csrfSecret?: string; emailHeaderName?: string } } | undefined;
-
-	const settings = headerAuthSettings?.settings ?? {};
-	const csrfSecret = settings.csrfSecret;
-	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
-
-	if (!csrfSecret) {
-		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	// Get credentials from THIS Form node (user must link proxyAuthApi to Form node)
+	let credentials: ICredentialDataDecryptedObject | undefined;
+	try {
+		credentials = await context.getCredentials<ICredentialDataDecryptedObject>('proxyAuthApi');
+	} catch {
+		throw new WebhookAuthorizationError(
+			500,
+			'Proxy Auth credentials not configured on Form node. Link the same Proxy Auth credential to this Form node.',
+		);
 	}
+
+	const encryptionSecret = credentials?.encryptionSecret as string;
+	if (!encryptionSecret) {
+		throw new WebhookAuthorizationError(
+			500,
+			'Encryption secret not configured in Proxy Auth credentials',
+		);
+	}
+
+	// Get proxy auth settings from trigger
+	const proxyAuthSettings = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
+	) as { settings?: { emailHeaderName?: string } } | undefined;
+
+	const settings = proxyAuthSettings?.settings ?? {};
+	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
 
 	// Get email from request header
 	const req = context.getRequestObject();
@@ -160,27 +183,36 @@ async function generateFormPageHeaderAuthToken(
 		(context.evaluateExpression(`{{ $('${trigger.name}').params.options?.path }}`) as string) ||
 		'';
 
-	return generateHeaderAuthToken(csrfSecret, email, formPath);
+	// Create encrypted token payload
+	const payload: TokenPayload = {
+		email: email.toLowerCase(),
+		formPath,
+		pageNumber,
+		timestamp: Date.now(),
+	};
+
+	return encryptToken(encryptionSecret, payload);
 }
 
 /**
- * Validates header auth token for intermediate Form pages.
- * Reads settings from the FormTrigger node.
+ * Validates AES-GCM encrypted proxy auth token for intermediate Form pages.
+ * Gets credentials from the Form node's own credential link (user must link proxyAuthApi to Form node).
+ * Decrypts the token to get the trusted email (NOT from headers).
+ * @returns Validation result with the trusted email from the decrypted token
  */
-export async function validateFormPageHeaderAuthToken(
+export async function validateFormPageProxyAuthToken(
 	context: IWebhookFunctions,
 	trigger: NodeTypeAndVersion,
-): Promise<boolean> {
-	// Check if trigger uses headerAuth
+): Promise<{ valid: boolean; email?: string }> {
+	// Check if trigger uses proxyAuth
 	const authentication = context.evaluateExpression(
 		`{{ $('${trigger.name}').params.${FORM_TRIGGER_AUTHENTICATION_PROPERTY} }}`,
 	) as string;
 
-	if (authentication !== 'headerAuth') {
-		return true;
+	if (authentication !== 'proxyAuth') {
+		return { valid: true };
 	}
 
-	const req = context.getRequestObject();
 	const headers = context.getHeaderData();
 
 	// Get token from header
@@ -189,29 +221,45 @@ export async function validateFormPageHeaderAuthToken(
 		throw new WebhookAuthorizationError(401, 'Missing CSRF token');
 	}
 
-	// Get header auth settings from trigger
-	const headerAuthSettings = context.evaluateExpression(
-		`{{ $('${trigger.name}').params.headerAuthSettings }}`,
-	) as
-		| { settings?: { csrfSecret?: string; emailHeaderName?: string; tokenExpiryMinutes?: number } }
-		| undefined;
-
-	const settings = headerAuthSettings?.settings ?? {};
-	const csrfSecret = settings.csrfSecret;
-	const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
-	const tokenExpiryMinutes = settings.tokenExpiryMinutes ?? 60;
-
-	if (!csrfSecret) {
-		throw new WebhookAuthorizationError(500, 'CSRF secret not configured for Header Auth');
+	// Get credentials from THIS Form node (user must link proxyAuthApi to Form node)
+	let credentials: ICredentialDataDecryptedObject | undefined;
+	try {
+		credentials = await context.getCredentials<ICredentialDataDecryptedObject>('proxyAuthApi');
+	} catch {
+		throw new WebhookAuthorizationError(
+			500,
+			'Proxy Auth credentials not configured on Form node. Link the same Proxy Auth credential to this Form node.',
+		);
 	}
 
-	// Get email from header - must still be present on POST (via proxy)
-	const email = req.headers[emailHeaderName] as string;
-	if (!email) {
+	const encryptionSecret = credentials?.encryptionSecret as string;
+	if (!encryptionSecret) {
 		throw new WebhookAuthorizationError(
-			401,
-			'Missing authentication header on POST - request may not have gone through auth proxy',
+			500,
+			'Encryption secret not configured in Proxy Auth credentials',
 		);
+	}
+
+	// Get proxy auth settings from trigger
+	const proxyAuthSettings = context.evaluateExpression(
+		`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
+	) as { settings?: { tokenExpiryMinutes?: number } } | undefined;
+
+	const settings = proxyAuthSettings?.settings ?? {};
+	const tokenExpiryMinutes = settings.tokenExpiryMinutes ?? 10;
+
+	// Decrypt token to get trusted payload
+	let payload: TokenPayload;
+	try {
+		payload = decryptToken(encryptionSecret, token);
+	} catch {
+		throw new WebhookAuthorizationError(403, 'Invalid or tampered token');
+	}
+
+	// Validate timestamp
+	const age = Date.now() - payload.timestamp;
+	if (age > tokenExpiryMinutes * 60 * 1000) {
+		throw new WebhookAuthorizationError(403, 'Token expired');
 	}
 
 	// Get form path - use trigger's webhook path
@@ -220,17 +268,14 @@ export async function validateFormPageHeaderAuthToken(
 		(context.evaluateExpression(`{{ $('${trigger.name}').params.options?.path }}`) as string) ||
 		'';
 
-	const isValid = validateHeaderAuthToken(
-		csrfSecret,
-		email,
-		formPath,
-		token,
-		tokenExpiryMinutes * 60 * 1000,
-	);
-
-	if (!isValid) {
-		throw new WebhookAuthorizationError(403, 'Invalid or expired CSRF token');
+	// Validate form path
+	if (payload.formPath !== formPath) {
+		throw new WebhookAuthorizationError(403, 'Token form path mismatch');
 	}
 
-	return true;
+	// Return trusted email from encrypted token (NOT from headers!)
+	return { valid: true, email: payload.email };
 }
+
+// Alias for backwards compatibility with Form.node.ts import
+export { validateFormPageProxyAuthToken as validateFormPageHeaderAuthToken };
