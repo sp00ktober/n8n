@@ -216,6 +216,15 @@ export abstract class AbstractServer {
 		// Setup webhook handlers before bodyParser, to let the Webhook node handle binary data in requests
 		if (this.webhooksEnabled) {
 			const liveWebhooksRequestHandler = createWebhookHandlerFor(Container.get(LiveWebhooks));
+
+			// Route for form-waiting with form trigger path prefix (for multi-page forms)
+			// Must be registered BEFORE the catch-all /form/*path route
+			// Matches: /form/{formPath}/form-waiting/{executionId}{/suffix}
+			this.app.all(
+				`/${this.endpointForm}/*formPath/form-waiting/:executionId{/:suffix}`,
+				createWebhookHandlerFor(Container.get(WaitingForms)),
+			);
+
 			// Register a handler for live forms
 			this.app.all(`/${this.endpointForm}/*path`, liveWebhooksRequestHandler);
 

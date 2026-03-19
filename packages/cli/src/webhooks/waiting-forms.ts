@@ -74,7 +74,21 @@ export class WaitingForms extends WaitingWebhooks {
 		req: WaitingWebhookRequest,
 		res: express.Response,
 	): Promise<IWebhookResponseCallbackData> {
-		const { path: executionId, suffix } = req.params;
+		// Handle both URL formats:
+		// 1. /form-waiting/:path (legacy)
+		// 2. /form/*formPath/form-waiting/:executionId (new, for multi-page forms with OAuth)
+		let executionId: string;
+		let suffix: string | undefined;
+
+		if (req.params.executionId) {
+			// New format: /form/{formPath}/form-waiting/{executionId}
+			executionId = req.params.executionId;
+			suffix = req.params.suffix;
+		} else {
+			// Legacy format: /form-waiting/{path}
+			executionId = req.params.path;
+			suffix = req.params.suffix;
+		}
 
 		this.logReceivedWebhook(req.method, executionId);
 

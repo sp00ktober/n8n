@@ -636,7 +636,21 @@ export async function executeWebhook(
 		);
 
 		if (responseMode === 'formPage' && !didSendResponse) {
-			res.send({ formWaitingUrl: `${additionalData.formWaitingBaseUrl}/${executionId}` });
+			// Get the form trigger's path to include in formWaitingUrl
+			// This ensures multi-page forms stay within the same path prefix for OAuth routing
+			const formTriggerPath = workflowStartNode.parameters?.path as string;
+			const globalConfig = Container.get(GlobalConfig);
+
+			let formWaitingUrl: string;
+			if (formTriggerPath) {
+				// e.g., https://n8n.dev.cstv.me/form/authenticated/HelloWorld/form-waiting/93
+				formWaitingUrl = `${additionalData.instanceBaseUrl}${globalConfig.endpoints.form}/${formTriggerPath}/form-waiting/${executionId}`;
+			} else {
+				// Fallback for forms without custom path
+				formWaitingUrl = `${additionalData.formWaitingBaseUrl}/${executionId}`;
+			}
+
+			res.send({ formWaitingUrl });
 			process.nextTick(() => res.end());
 			didSendResponse = true;
 		}
