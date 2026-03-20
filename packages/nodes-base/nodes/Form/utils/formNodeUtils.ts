@@ -11,7 +11,12 @@ import {
 
 import { renderForm, sanitizeHtml } from './utils';
 import { generateFormPostBasicAuthToken } from '../../Webhook/utils';
-import { encryptToken, decryptToken, type TokenPayload } from '../../Webhook/tokenCrypto';
+import {
+	encryptToken,
+	decryptToken,
+	decryptEmailFromUrl,
+	type TokenPayload,
+} from '../../Webhook/tokenCrypto';
 import { WebhookAuthorizationError } from '../../Webhook/error';
 import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
 
@@ -180,7 +185,7 @@ async function generateFormPageProxyAuthToken(
 	let email: string;
 
 	if (incomingToken) {
-		// Extract email from the incoming token (from previous page)
+		// Extract email from the incoming token (from previous page POST)
 		try {
 			const previousPayload = decryptToken(encryptionSecret, incomingToken);
 			email = previousPayload.email;
@@ -188,24 +193,38 @@ async function generateFormPageProxyAuthToken(
 			throw new WebhookAuthorizationError(403, 'Invalid or tampered token from previous page');
 		}
 	} else {
-		// Fallback: try to get email from request header (for first page or direct requests)
-		const proxyAuthSettings = context.evaluateExpression(
-			`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
-		) as { settings?: { emailHeaderName?: string } } | undefined;
-
-		const settings = proxyAuthSettings?.settings ?? {};
-		const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
-
 		const req = context.getRequestObject();
-		email = req.headers[emailHeaderName] as string;
 
-		if (!email) {
-			throw new WebhookAuthorizationError(
-				401,
-				'No authentication token or email header found. Submit from an authenticated page.',
-			);
+		// Try URL query param first (for form-waiting GET requests)
+		// This is used when multi-page forms redirect via formWaitingUrl
+		const encryptedEmailParam = req.query?.authEmail as string;
+
+		if (encryptedEmailParam) {
+			try {
+				// Decrypt email from URL parameter (60 min expiry)
+				email = decryptEmailFromUrl(encryptionSecret, encryptedEmailParam, 60);
+			} catch (error) {
+				throw new WebhookAuthorizationError(403, 'Invalid or expired email token in URL');
+			}
+		} else {
+			// Fallback: try to get email from OAuth header (for first page direct requests)
+			const proxyAuthSettings = context.evaluateExpression(
+				`{{ $('${trigger.name}').params.proxyAuthSettings }}`,
+			) as { settings?: { emailHeaderName?: string } } | undefined;
+
+			const settings = proxyAuthSettings?.settings ?? {};
+			const emailHeaderName = (settings.emailHeaderName ?? 'x-auth-request-email').toLowerCase();
+
+			email = req.headers[emailHeaderName] as string;
+
+			if (!email) {
+				throw new WebhookAuthorizationError(
+					401,
+					'No authentication token or email header found. Submit from an authenticated page.',
+				);
+			}
+			email = email.toLowerCase();
 		}
-		email = email.toLowerCase();
 	}
 
 	// Create encrypted token payload with the chained email

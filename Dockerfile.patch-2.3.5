@@ -21,6 +21,9 @@ COPY packages/cli/dist/webhooks/webhook-helpers.js /usr/local/lib/node_modules/n
 COPY packages/cli/dist/abstract-server.js /usr/local/lib/node_modules/n8n/dist/abstract-server.js
 COPY packages/cli/dist/webhooks/waiting-forms.js /usr/local/lib/node_modules/n8n/dist/webhooks/waiting-forms.js
 
+# Copy patched form template with fixed status URL construction
+COPY packages/cli/templates/form-trigger.handlebars /usr/local/lib/node_modules/n8n/templates/form-trigger.handlebars
+
 # Copy patch script and run it to update nodes.json and credentials.json files
 COPY patches/patch-nodes-json.js /tmp/patch-nodes-json.js
 RUN chmod -R a+w /usr/local/lib/node_modules/n8n/node_modules/n8n-nodes-base/dist/types && \

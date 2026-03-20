@@ -636,19 +636,23 @@ export async function executeWebhook(
 		);
 
 		if (responseMode === 'formPage' && !didSendResponse) {
-			// Get the form trigger's path to include in formWaitingUrl
+			// Use webhookData.path to include the form trigger's path in formWaitingUrl
 			// This ensures multi-page forms stay within the same path prefix for OAuth routing
-			const formTriggerPath = workflowStartNode.parameters?.path as string;
 			const globalConfig = Container.get(GlobalConfig);
 
 			let formWaitingUrl: string;
-			if (formTriggerPath) {
+			console.log('[DEBUG formPage] webhookData.path:', webhookData.path);
+			console.log('[DEBUG formPage] instanceBaseUrl:', additionalData.instanceBaseUrl);
+			console.log('[DEBUG formPage] globalConfig.endpoints.form:', globalConfig.endpoints.form);
+			console.log('[DEBUG formPage] executionId:', executionId);
+			if (webhookData.path) {
 				// e.g., https://n8n.dev.cstv.me/form/authenticated/HelloWorld/form-waiting/93
-				formWaitingUrl = `${additionalData.instanceBaseUrl}${globalConfig.endpoints.form}/${formTriggerPath}/form-waiting/${executionId}`;
+				formWaitingUrl = `${additionalData.instanceBaseUrl}${globalConfig.endpoints.form}/${webhookData.path}/form-waiting/${executionId}`;
 			} else {
 				// Fallback for forms without custom path
 				formWaitingUrl = `${additionalData.formWaitingBaseUrl}/${executionId}`;
 			}
+			console.log('[DEBUG formPage] formWaitingUrl:', formWaitingUrl);
 
 			res.send({ formWaitingUrl });
 			process.nextTick(() => res.end());

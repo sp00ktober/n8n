@@ -31,6 +31,7 @@ import {
 	validateFormPostProxyAuthToken,
 	validateWebhookAuthentication,
 } from '../../Webhook/utils';
+import { encryptEmailForUrl } from '../../Webhook/tokenCrypto';
 import { FORM_TRIGGER_AUTHENTICATION_PROPERTY } from '../interfaces';
 import type { FormTriggerData, FormField } from '../interfaces';
 
@@ -677,7 +678,24 @@ export async function formWebhook(
 	// POST request - validate proxy auth token if applicable
 	if (node.typeVersion > 1) {
 		try {
-			await validateFormPostProxyAuthToken(context, authProperty);
+			const validationResult = await validateFormPostProxyAuthToken(context, authProperty);
+
+			// If we got a validated email, encrypt it for the formWaitingUrl
+			// This allows page 2+ to get the email from the URL instead of OAuth headers
+			if (validationResult.email) {
+				try {
+					const credentials = await context.getCredentials('proxyAuthApi');
+					const encryptionSecret = credentials?.encryptionSecret as string;
+					if (encryptionSecret) {
+						const encryptedEmail = encryptEmailForUrl(encryptionSecret, validationResult.email);
+						// Store in res.locals so webhook-helpers.js can add to formWaitingUrl
+						res.locals = res.locals || {};
+						res.locals.encryptedProxyAuthEmail = encryptedEmail;
+					}
+				} catch {
+					// If we can't encrypt, continue without - not critical for validation
+				}
+			}
 		} catch (error) {
 			if (error instanceof WebhookAuthorizationError) {
 				res.status(error.responseCode).json({ error: error.message });
