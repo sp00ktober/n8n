@@ -641,10 +641,6 @@ export async function executeWebhook(
 			const globalConfig = Container.get(GlobalConfig);
 
 			let formWaitingUrl: string;
-			console.log('[DEBUG formPage] webhookData.path:', webhookData.path);
-			console.log('[DEBUG formPage] instanceBaseUrl:', additionalData.instanceBaseUrl);
-			console.log('[DEBUG formPage] globalConfig.endpoints.form:', globalConfig.endpoints.form);
-			console.log('[DEBUG formPage] executionId:', executionId);
 			if (webhookData.path) {
 				// e.g., https://n8n.dev.cstv.me/form/authenticated/HelloWorld/form-waiting/93
 				formWaitingUrl = `${additionalData.instanceBaseUrl}${globalConfig.endpoints.form}/${webhookData.path}/form-waiting/${executionId}`;
@@ -652,7 +648,6 @@ export async function executeWebhook(
 				// Fallback for forms without custom path
 				formWaitingUrl = `${additionalData.formWaitingBaseUrl}/${executionId}`;
 			}
-			console.log('[DEBUG formPage] formWaitingUrl:', formWaitingUrl);
 
 			res.send({ formWaitingUrl });
 			process.nextTick(() => res.end());
